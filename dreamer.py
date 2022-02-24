@@ -160,8 +160,6 @@ def draw_sequences_np(indices, sequence_length, max_index, buffer_end_location, 
         all_terms += [np.take(terminals,np.arange(sequence_length)+i, axis=0, mode='wrap')]
     return np.stack(all_obs), np.stack(all_acts), np.stack(all_rs), np.stack(all_terms)
 
-
-
 class replay_buffer:
     def __init__(self, buffer_size, obs_shape, key, use_cpu=False):
         self.key = key
@@ -225,8 +223,6 @@ class replay_buffer:
 ########################################################################
 # Define Losses and Other Functions
 ########################################################################
-def batchwise_flatten(x):
-    return jnp.reshape(x, [x.shape[0],-1])
 
 #This returns the model loss along with intermediate agent states which are then reused to initialize the actor-critic training
 def get_model_loss_and_states_function(networks, binary_state, image_state, num_actions):
@@ -248,60 +244,52 @@ def get_model_loss_and_states_function(networks, binary_state, image_state, num_
             state_network = networks['state']
             state_params = params['state']
 
-        h_list = []
-        phi_list = []
-
         # initialize hidden state for recurrent network
-        h = jnp.zeros((batch_size, num_hidden_units))
+        h = jnp.zeros((num_hidden_units))
         loss = 0.0
-        phi_hat_dist = None
-        r_dist = None
-        gamma_dist = None
-        # record whether each batch element has terminated
-        terminated = jnp.zeros(batch_size)
+        # record whether trajectory has terminated
+        terminated = False
         nonterminal_steps = 0
+
         # generate sequential predictions
-        for i in range(sequence_length):
+        def model_loss_loop_function(carry, data):
+            h, loss, key, terminated, nonterminal_steps = carry
+            observation, action, reward, terminal = data
+
             key, subkey = jx.random.split(key)
-            phi, phi_dist = phi_network(phi_params, observations[:,i], h, subkey)
+            phi, phi_dist = phi_network(phi_params, observation, h, subkey)
 
-            h_list+=[h]
-            phi_list+=[phi]
-
-            one_hot_actions = jnp.eye(num_actions)[actions[:,i]]
+            one_hot_actions = jnp.eye(num_actions)[action]
 
             if(state_prediction_weight>0.0):
                 S_hat_params = state_network(state_params, phi, h)
                 if(binary_state):
-                    S_log_probs = log_binary_probability(observations[:,i], S_hat_params)
+                    S_log_probs = log_binary_probability(observation, S_hat_params)
                 else:
-                    S_log_probs = log_gaussian_probability(observations[:,i], S_hat_params)
-                if(image_state):
-                    log_P_S = jnp.sum(S_log_probs, axis=(1,2,3))
-                else:
-                    log_P_S = jnp.sum(S_log_probs, axis=(1))
+                    S_log_probs = log_gaussian_probability(observation, S_hat_params)
+                log_P_S = jnp.sum(S_log_probs)
                 state_prediction_loss = -log_P_S
             else:
                 state_prediction_loss = 0.0
 
             # no need to reconstruct state on terminal steps, just need to get reward and terminal right
-            state_prediction_loss = jnp.where(terminals[:,i], 0.0, state_prediction_loss)
+            state_prediction_loss = jnp.where(terminal, 0.0, state_prediction_loss)
 
             r_dist = reward_network(reward_params, phi, h)
-            reward_loss = -log_gaussian_probability(rewards[:,i], r_dist)
+            reward_loss = -log_gaussian_probability(reward, r_dist)
 
             gamma_dist = termination_network(termination_params, phi, h)
-            termination_loss = -log_binary_probability(jnp.logical_not(terminals[:,i]), gamma_dist)
+            termination_loss = -log_binary_probability(jnp.logical_not(terminal), gamma_dist)
 
             key, subkey = jx.random.split(key)
             phi_hat, phi_hat_dist = next_phi_network(next_phi_params, h, subkey)
             # KL loss applied to make current phi closer to prediction
-            KL_posterior_loss = jnp.sum(latent_KL(phi_dist,jx.lax.stop_gradient(phi_hat_dist)),axis=1)
+            KL_posterior_loss = jnp.sum(latent_KL(phi_dist,jx.lax.stop_gradient(phi_hat_dist)))
 
-            posterior_entropy_loss = -jnp.sum(latent_entropy(phi_dist),axis=1)
+            posterior_entropy_loss = -jnp.sum(latent_entropy(phi_dist))
 
             # KL loss applied to make prediction closer to current phi
-            KL_prior_loss = jnp.sum(latent_KL(jx.lax.stop_gradient(phi_dist),phi_hat_dist),axis=1)
+            KL_prior_loss = jnp.sum(latent_KL(jx.lax.stop_gradient(phi_dist),phi_hat_dist))
 
             step_loss = (KL_posterior_weight*KL_posterior_loss+
                     KL_prior_weight*KL_prior_loss+
@@ -313,23 +301,18 @@ def get_model_loss_and_states_function(networks, binary_state, image_state, num_
             # no need to predict anything that occurs after termination
             step_loss = jnp.where(terminated, 0.0, step_loss)
 
-            # Note loss is summed over batches and sequence steps
             loss += jnp.sum(step_loss)
 
-            h = recurrent_network(recurrent_params,phi,one_hot_actions,h)
+            h = jnp.where(terminal, jnp.zeros((num_hidden_units)), recurrent_network(recurrent_params,phi,one_hot_actions,h))
 
-            nonterminal_steps+=jnp.sum(jnp.logical_not(terminated))
+            nonterminal_steps+=jnp.logical_not(terminated)
 
-            # record whether each batch element has terminated
-            terminated = jnp.logical_or(terminated, terminals[:,i])
+            terminated = jnp.logical_or(terminated, terminal)
+            return (h, loss, key, terminated, nonterminal_steps), (phi, h)
 
-        # concatenate phi and h from each step along batch dimension
-        h_array = jnp.concatenate(h_list,axis=0)
-        phi_array = jnp.concatenate(phi_list,axis=0)
-
-        # loss here is divided by total nonterminal steps (summed over batches)
+        (h, loss, key, terminated, nonterminal_steps), (phi_array, h_array) = jx.lax.scan(model_loss_loop_function, (h, loss, key, terminated, nonterminal_steps), (observations, actions, rewards, terminals))
         return loss/nonterminal_steps, phi_array, h_array
-    return model_loss_and_states
+    return vmap(model_loss_and_states, in_axes=(None, 0, 0, 0, 0, 0))
 
 # takes a function which returns loss, phis, hs and transforms it to a function which returns grad(loss), phis, hs
 def model_loss_and_states_to_model_grad_and_states(func):
@@ -337,7 +320,9 @@ def model_loss_and_states_to_model_grad_and_states(func):
         return func(*args)[0]
 
     def model_grad_and_states(*args):
-        return grad(model_loss)(*args), *func(*args)[1:]
+        loss_grad = grad(lambda *args: jnp.mean(model_loss(*args)))(*args)
+        phi_array, h_array = func(*args)[1:]
+        return loss_grad, phi_array.reshape([config['sequence_length']*config['batch_size']]+list(phi_array.shape[2:])), h_array.reshape([config['sequence_length']*config['batch_size']]+list(h_array.shape[2:]))
 
     return model_grad_and_states
 
@@ -380,37 +365,69 @@ def get_model_eval_function(networks, binary_state, image_state, num_actions):
         nonterminal_steps = 0
 
         # initialize hidden state for recurrent network
-        h = jnp.zeros((batch_size, num_hidden_units))
-        phi_hat_dist = None
-        r_dist = None
-        gamma_dist = None
-        # record whether each batch element has terminated
-        terminated = jnp.zeros(batch_size, dtype=bool)
-        # generate sequential predictions
-        for i in range(sequence_length):
+        h = jnp.zeros(num_hidden_units)
+        # record whether trajectory has terminated
+        terminated = False
+
+        # long tuple of things we need to maintain and update during evaluation loop, could probably clean this up.
+        # Note: r_1 and r_0 predictions are useful in MinAtar in particular because rewards are almost always 1 or 0
+        # thus we can observe how accurate the model is for each case
+        loop_carry = (h,
+                      S_mean_logprob_tot,
+                      S_nonzero_tot,
+                      phi_mean_cross_entropy,
+                      phi_mean_entropy,
+                      r_1_count,
+                      r_0_count,
+                      r_hat_1_tot,
+                      r_hat_0_tot,
+                      gamma_1_count,
+                      gamma_0_count,
+                      gamma_hat_1_tot,
+                      gamma_hat_0_tot,
+                      key,
+                      terminated,
+                      nonterminal_steps)
+
+        def evaluate_model_loop_function(carry, data):
+            (h,
+             S_mean_logprob_tot,
+             S_nonzero_tot,
+             phi_mean_cross_entropy,
+             phi_mean_entropy,
+             r_1_count,
+             r_0_count,
+             r_hat_1_tot,
+             r_hat_0_tot,
+             gamma_1_count,
+             gamma_0_count,
+             gamma_hat_1_tot,
+             gamma_hat_0_tot,
+             key,
+             terminated,
+             nonterminal_steps) = carry
+
+            observation, action, reward, terminal = data
+
             key, subkey = jx.random.split(key)
-            phi, phi_dist = phi_network(phi_params, observations[:,i], h, subkey)
+            phi, phi_dist = phi_network(phi_params, observation, h, subkey)
 
             key, subkey = jx.random.split(key)
             phi_hat, phi_hat_dist = next_phi_network(next_phi_params, h, subkey)
 
-            one_hot_actions = jnp.eye(num_actions)[actions[:,i]]
+            one_hot_actions = jnp.eye(num_actions)[action]
 
             if(state_prediction_weight>0.0):
                 S_hat_params = state_network(state_params, phi, h)
                 if(binary_state):
-                    S_log_probs = log_binary_probability(observations[:,i], S_hat_params)
+                    S_log_probs = log_binary_probability(observation, S_hat_params)
                 else:
-                    S_log_probs = log_gaussian_probability(observations[:,i], S_hat_params)
+                    S_log_probs = log_gaussian_probability(observation, S_hat_params)
 
-                if(image_state):
-                    log_P_S = jnp.mean(S_log_probs, axis=(1,2,3))
-                    S_nonzero = jnp.mean(observations[:,i], axis=(1,2,3))
-                else:
-                    log_P_S = jnp.mean(S_log_probs, axis=(1))
-                    S_nonzero = jnp.mean(observations[:,i], axis=(1))
-                S_mean_logprob_tot += jnp.sum(jnp.where(terminated, 0.0,log_P_S))
-                S_nonzero_tot += jnp.sum(jnp.where(terminated, 0.0,S_nonzero))
+                log_P_S = jnp.mean(S_log_probs)
+                S_nonzero = jnp.mean(observation)
+                S_mean_logprob_tot += jnp.where(terminated, 0.0,log_P_S)
+                S_nonzero_tot += jnp.where(terminated, 0.0,S_nonzero)
 
             r_dist = reward_network(reward_params, phi, h)
             r_hat = r_dist['mu']
@@ -418,51 +435,132 @@ def get_model_eval_function(networks, binary_state, image_state, num_actions):
             gamma_dist = termination_network(termination_params, phi, h)
             gamma_hat = jnp.exp(log_binary_probability(1.0,gamma_dist))
 
-            phi_mean_cross_entropy += jnp.sum(jnp.where(terminated, 0.0,jnp.mean(latent_cross_entropy(phi_dist,phi_hat_dist), axis=1)))
-            phi_mean_entropy += jnp.sum(jnp.where(terminated, 0.0, jnp.mean(latent_entropy(phi_dist), axis=1)))
+            phi_mean_cross_entropy += jnp.sum(jnp.where(terminated, 0.0,jnp.mean(latent_cross_entropy(phi_dist,phi_hat_dist))))
+            phi_mean_entropy += jnp.sum(jnp.where(terminated, 0.0, jnp.mean(latent_entropy(phi_dist))))
 
-            r_1_count += jnp.sum(jnp.where(terminated, 0.0, rewards[:,i]==1.0))
-            r_0_count += jnp.sum(jnp.where(terminated, 0.0, rewards[:,i]==0.0))
+            r_1_count += jnp.sum(jnp.where(terminated, 0.0, reward==1.0))
+            r_0_count += jnp.sum(jnp.where(terminated, 0.0, reward==0.0))
 
-            r_hat_1 = jnp.where(rewards[:,i]==1.0, r_hat, 0.0)
-            r_hat_0 = jnp.where(rewards[:,i]==0.0, r_hat, 0.0)
+            r_hat_1 = jnp.where(reward==1.0, r_hat, 0.0)
+            r_hat_0 = jnp.where(reward==0.0, r_hat, 0.0)
             r_hat_1_tot += jnp.sum(jnp.where(terminated, 0.0, r_hat_1))
             r_hat_0_tot += jnp.sum(jnp.where(terminated, 0.0, r_hat_0))
 
-            gamma_1_count += jnp.sum(jnp.where(terminated, 0.0, jnp.logical_not(terminals[:,i])))
-            gamma_0_count += jnp.sum(jnp.where(terminated, 0.0, terminals[:,i]))
+            gamma_1_count += jnp.sum(jnp.where(terminated, 0.0, jnp.logical_not(terminal)))
+            gamma_0_count += jnp.sum(jnp.where(terminated, 0.0, terminal))
 
-            gamma_hat_1 = jnp.where(jnp.logical_not(terminals[:,i]), gamma_hat, 0.0)
-            gamma_hat_0 = jnp.where(terminals[:,i], gamma_hat,0.0)
+            gamma_hat_1 = jnp.where(jnp.logical_not(terminal), gamma_hat, 0.0)
+            gamma_hat_0 = jnp.where(terminal, gamma_hat,0.0)
             gamma_hat_1_tot += jnp.sum(jnp.where(terminated, 0.0, gamma_hat_1))
             gamma_hat_0_tot += jnp.sum(jnp.where(terminated, 0.0, gamma_hat_0))
 
-            h = recurrent_network(recurrent_params,phi,one_hot_actions,h)
+            h = jnp.where(terminal, jnp.zeros((num_hidden_units)), recurrent_network(recurrent_params,phi,one_hot_actions,h))
 
-            nonterminal_steps+=jnp.sum(jnp.logical_not(terminated))
+            nonterminal_steps+=jnp.logical_not(terminated)
 
-            # record whether each batch element has terminated
-            terminated = jnp.logical_or(terminated, terminals[:,i])
+            terminated = jnp.logical_or(terminated, terminal)
 
-        # reward prediction related metrics here only really make sense in MinAtar where rewards are usually 0 or 1
-        metrics={'gamma_0_pred' : gamma_hat_0_tot/gamma_0_count,
-                 'gamma_1_pred' : gamma_hat_1_tot/gamma_1_count,
-                 'r_0_pred' : r_hat_0_tot/r_0_count,
-                 'r_1_pred' : r_hat_1_tot/r_1_count,
+            loop_carry = (h,
+                          S_mean_logprob_tot,
+                          S_nonzero_tot,
+                          phi_mean_cross_entropy,
+                          phi_mean_entropy,
+                          r_1_count,
+                          r_0_count,
+                          r_hat_1_tot,
+                          r_hat_0_tot,
+                          gamma_1_count,
+                          gamma_0_count,
+                          gamma_hat_1_tot,
+                          gamma_hat_0_tot,
+                          key,
+                          terminated,
+                          nonterminal_steps)
+            return loop_carry, None
+
+        loop_carry = (h,
+                      S_mean_logprob_tot,
+                      S_nonzero_tot,
+                      phi_mean_cross_entropy,
+                      phi_mean_entropy,
+                      r_1_count,
+                      r_0_count,
+                      r_hat_1_tot,
+                      r_hat_0_tot,
+                      gamma_1_count,
+                      gamma_0_count,
+                      gamma_hat_1_tot,
+                      gamma_hat_0_tot,
+                      key,
+                      terminated,
+                      nonterminal_steps)
+
+        (h,
+         S_mean_logprob_tot,
+         S_nonzero_tot,
+         phi_mean_cross_entropy,
+         phi_mean_entropy,
+         r_1_count,
+         r_0_count,
+         r_hat_1_tot,
+         r_hat_0_tot,
+         gamma_1_count,
+         gamma_0_count,
+         gamma_hat_1_tot,
+         gamma_hat_0_tot,
+         key,
+         terminated,
+         nonterminal_steps), _ = jx.lax.scan(evaluate_model_loop_function, loop_carry,(observations, actions, rewards, terminals))
+
+        metrics={'gamma_0_tot' : gamma_hat_0_tot,
+                 'gamma_1_tot' : gamma_hat_1_tot,
+                 'r_0_tot' : r_hat_0_tot,
+                 'r_1_tot' : r_hat_1_tot,
                  'gamma_0_count': gamma_0_count,
                  'gamma_1_count': gamma_1_count,
                  'r_0_count': r_0_count,
                  'r_1_count': r_1_count,
-                 'phi_cross_entropy' : phi_mean_cross_entropy/nonterminal_steps,
-                 'phi_entropy' : phi_mean_entropy/nonterminal_steps,
-                 'S_logprob' : S_mean_logprob_tot/nonterminal_steps,
-                 'S_nonzero_tot' : S_nonzero_tot/nonterminal_steps
+                 'phi_cross_entropy' : phi_mean_cross_entropy,
+                 'phi_entropy' : phi_mean_entropy,
+                 'S_logprob_tot' : S_mean_logprob_tot,
+                 'S_nonzero_tot' : S_nonzero_tot,
+                 'nonterminal_steps' : nonterminal_steps
                  }
         return metrics
-    return model_eval
+
+    def multi_model_eval(*args):
+        metrics = vmap(model_eval, in_axes=(None, 0,0,0,0,0))(*args)
+        nonterminal_steps = jnp.sum(metrics["nonterminal_steps"])
+        r_0_count = jnp.sum(metrics["r_0_count"])
+        r_1_count = jnp.sum(metrics["r_1_count"])
+        gamma_0_count = jnp.sum(metrics["gamma_0_count"])
+        gamma_1_count = jnp.sum(metrics["gamma_1_count"])
+        gamma_0_tot = jnp.sum(metrics["gamma_0_tot"])
+        gamma_1_tot = jnp.sum(metrics["gamma_1_tot"])
+        r_0_tot = jnp.sum(metrics["r_0_tot"])
+        r_1_tot = jnp.sum(metrics["r_1_tot"])
+        S_logprob_tot = jnp.sum(metrics["S_logprob_tot"])
+        S_nonzero_tot = jnp.sum(metrics["S_nonzero_tot"])
+        phi_cross_entropy = jnp.sum(metrics["phi_cross_entropy"])
+        phi_entropy = jnp.sum(metrics["phi_entropy"])
+        combined_metrics={'gamma_0_pred' : gamma_0_tot/gamma_0_count,
+                          'gamma_1_pred' : gamma_1_tot/gamma_1_count,
+                          'r_0_pred' : r_0_tot/r_0_count,
+                          'r_1_pred' : r_1_tot/r_1_count,
+                          'gamma_0_frac': gamma_0_count/nonterminal_steps,
+                          'gamma_1_frac': gamma_1_count/nonterminal_steps,
+                          'r_0_frac': r_0_count/nonterminal_steps,
+                          'r_1_frac': r_1_count/nonterminal_steps,
+                          'phi_cross_entropy' : phi_cross_entropy/nonterminal_steps,
+                          'phi_entropy' : phi_entropy/nonterminal_steps,
+                          'S_logprob' : S_logprob_tot/nonterminal_steps,
+                          'S_nonzero_tot' : S_nonzero_tot/nonterminal_steps
+                          }
+        return combined_metrics
+    return jit(multi_model_eval)
 
 def get_AC_loss_function(actor_network, critic_network, model_networks, num_actions):
-    def AC_loss(actor_params, fast_critic_params, slow_critic_params, model_params, key, phis, hs):
+    def AC_loss(actor_params, fast_critic_params, slow_critic_params, model_params, key, phi, h):
         reward_params = model_params['reward']
         recurrent_params = model_params['recurrent']
         termination_params = model_params['termination']
@@ -473,58 +571,65 @@ def get_AC_loss_function(actor_network, critic_network, model_networks, num_acti
         termination_network = model_networks['termination']
         next_phi_network = model_networks['next_phi']
 
-        loss = 0.0
+        def model_trajectory_loop_function(carry, data):
+            h, phi, key = carry
 
-        curr_pi_logit = actor_network(actor_params, phis, hs)
-        fast_curr_V = critic_network(fast_critic_params, phis, hs)
-        slow_curr_V = critic_network(slow_critic_params, phis, hs)
-        pi_logits =[]
-        f_Vs = []
-        s_Vs = []
-        gammas = []
-        rewards = []
-        actions = []
-        for t in range(rollout_length):
-            f_Vs+=[fast_curr_V]
-            s_Vs+=[slow_curr_V]
-            pi_logits+=[curr_pi_logit]
+            #Just use mean reward when sampling
+            reward_dist = reward_network(reward_params, phi, h)
+            reward = reward_dist['mu']
+
+            gamma_dist = termination_network(termination_params, phi, h)
+            gamma = jnp.exp(log_binary_probability(True, gamma_dist))*discount
+
+            curr_pi_logit = actor_network(actor_params, phi, h)
+            fast_curr_V = critic_network(fast_critic_params, phi, h)
+            slow_curr_V = critic_network(slow_critic_params, phi, h)
 
             key, subkey = jx.random.split(key)
             action = jx.random.categorical(subkey, curr_pi_logit)
             one_hot_action = jnp.eye(num_actions)[action]
-            actions+=[one_hot_action]
 
-            hs = recurrent_network(recurrent_params,phis,one_hot_action,hs)
+            h = recurrent_network(recurrent_params,phi,one_hot_action,h)
 
             key, subkey = jx.random.split(key)
-            phis, _ = jx.lax.stop_gradient(next_phi_network(next_phi_params, hs, subkey))
+            phi, _ = jx.lax.stop_gradient(next_phi_network(next_phi_params, h, subkey))
 
-            # just use mean reward when sampling
-            reward_dist = reward_network(reward_params, phis, hs)
-            reward = reward_dist['mu']
-            rewards += [reward]
+            return (h,phi,key), (curr_pi_logit, fast_curr_V, slow_curr_V, one_hot_action, gamma, reward)
 
-            gamma_dist = termination_network(termination_params, phis, hs)
-            gamma = jnp.exp(log_binary_probability(True, gamma_dist))*discount
-            gammas += [gamma]
+        # gather model trajectory
+        (h,phi,key), (pi_logits, f_Vs, s_Vs, actions, gammas, rewards) = jx.lax.scan(model_trajectory_loop_function, (h, phi, key),jnp.arange(rollout_length))
 
-            curr_pi_logit = actor_network(actor_params, phis, hs)
-            fast_curr_V = critic_network(fast_critic_params, phis, hs)
-            slow_curr_V = critic_network(slow_critic_params, phis, hs)
+        # compute final reward, gamma and value for first bootstrapped return
+        reward_dist = reward_network(reward_params, phi, h)
+        reward = reward_dist['mu']
 
-        G = reward+gamma*jx.lax.stop_gradient(slow_curr_V)
-        for pi_logit, f_V, s_V, action, gamma, reward in zip(reversed(pi_logits), reversed(f_Vs), reversed(s_Vs), reversed(actions), reversed(gammas), reversed(rewards)):
+        gamma_dist = termination_network(termination_params, phi, h)
+        gamma = jnp.exp(log_binary_probability(True, gamma_dist))*discount
+
+        slow_curr_V = critic_network(slow_critic_params, phi, h)
+
+        def compute_loss_loop_function(carry, data):
+            G, loss = carry
+            pi_logit, f_V, s_V, action, gamma, reward = data
+
             critic_loss = jnp.mean(0.5*(G-f_V)**2)
-            entropy = -jnp.sum(jx.nn.log_softmax(pi_logit)*jx.nn.softmax(pi_logit), axis=1)
+            entropy = -jnp.sum(jx.nn.log_softmax(pi_logit)*jx.nn.softmax(pi_logit))
 
-            actor_loss = jnp.mean(-0.5*jx.lax.stop_gradient(G-s_V)*jnp.sum(jx.nn.log_softmax(pi_logit)*action,axis=1)-beta*entropy)
+            actor_loss = jnp.mean(-0.5*jx.lax.stop_gradient(G-s_V)*jnp.sum(jx.nn.log_softmax(pi_logit)*action)-beta*entropy)
 
             G = reward+gamma*((1-lmbda)*jx.lax.stop_gradient(s_V)+lmbda*G)
 
             loss += jnp.mean(critic_loss+actor_loss)
 
+            return (G, loss), None
+
+        loss = 0.0
+        G = reward+gamma*jx.lax.stop_gradient(slow_curr_V)
+        # process model trajectory in reverse
+        (G, loss), _ = jx.lax.scan(compute_loss_loop_function, (G, loss), (pi_logits, f_Vs, s_Vs, actions, gammas, rewards), reverse=True)
+
         return loss/rollout_length
-    return AC_loss
+    return lambda *args: jnp.mean(vmap(AC_loss, in_axes=(None, None, None, None, 0, 0, 0))(*args))
 
 def get_act_function(actor_network, recurrent_network, num_actions):
     def act(actor_params, recurrent_params, phi, h, key, action, sample_action):
@@ -534,7 +639,7 @@ def get_act_function(actor_network, recurrent_network, num_actions):
             key, subkey = jx.random.split(key)
             a = jx.random.categorical(subkey, pi_logit)
         else:
-            a = jnp.expand_dims(action,axis=0)
+            a = action
 
         h = recurrent_network(recurrent_params,phi,jnp.eye(num_actions)[a],h)
         return a, h
@@ -547,6 +652,12 @@ def get_observe_function(phi_network):
         return phi
     return observe
 
+def get_update_function(opt_update, grad_clip):
+    def update(t, grads, opt_state):
+        grads = optimizers.clip_grads(grads, grad_clip)
+        opt_state = opt_update(t, grads, opt_state)
+        return opt_state
+    return update
 
 ########################################################################
 # Define Agent
@@ -578,10 +689,10 @@ class dreamer_agent():
 
         # dummy variables for network initialization
         self.key, dummy_key = jx.random.split(self.key)
-        dummy_state = jnp.zeros([1]+list(state_shape))
-        dummy_phi = jnp.zeros((1,config['num_features']*(config['feature_width'] if config['latent_type']=='categorical' else 1)))
-        dummy_a = jnp.zeros((1,num_actions))
-        dummy_h = jnp.zeros((1,config['num_hidden_units']))
+        dummy_state = jnp.zeros(list(state_shape))
+        dummy_phi = jnp.zeros((config['num_features']*(config['feature_width'] if config['latent_type']=='categorical' else 1)))
+        dummy_a = jnp.zeros((num_actions))
+        dummy_h = jnp.zeros((config['num_hidden_units']))
 
         self.key, subkey = jx.random.split(self.key)
         self.buffer = replay_buffer(config['buffer_size'], state_shape, subkey, config['cpu_replay'])
@@ -651,6 +762,7 @@ class dreamer_agent():
 
         self.model_opt_state = model_opt_init(model_params)
         self.model_opt_update = jit(self.model_opt_update)
+        self.model_update = jit(get_update_function(self.model_opt_update, config['grad_clip']))
 
         model_loss_and_states = get_model_loss_and_states_function(self.model_networks, self.binary_state, image_state, num_actions)
 
@@ -687,19 +799,19 @@ class dreamer_agent():
         self.critic_opt_state = critic_opt_init(fast_critic_params)
         self.critic_opt_update = jit(self.critic_opt_update)
         self.AC_loss_grad = jit(grad(get_AC_loss_function(self.actor_apply,self.critic_apply,self.model_networks, num_actions),argnums=(0,1)))
+        self.critic_update = jit(get_update_function(self.critic_opt_update, config['grad_clip']))
+        self.actor_update = jit(get_update_function(self.actor_opt_update, config['grad_clip']))
 
         # maintain state information for acting in the real world
         self.h = jnp.zeros(dummy_h.shape)
         self.phi = jnp.zeros(dummy_phi.shape)
 
-        # phi_params, phi_network, observation, phi, h, key
         self._observe = jit(get_observe_function(self.model_networks['phi']))
-        # actor_params, recurrent_params, phi, h, key, action, sample_action
         self._act = jit(get_act_function(self.actor_apply,self.model_networks['recurrent'],num_actions),static_argnames=('sample_action'))
 
     def act(self, observation, random=False):
         self.key, subkey = jx.random.split(self.key)
-        self.phi = self._observe(self.model_params()['phi'], jnp.expand_dims(jnp.asarray(observation,dtype=float), axis=0), self.phi, self.h, subkey)
+        self.phi = self._observe(self.model_params()['phi'], jnp.asarray(observation,dtype=float), self.phi, self.h, subkey)
 
         if(random):
             self.key, subkey = jx.random.split(self.key)
@@ -737,21 +849,21 @@ class dreamer_agent():
     def update(self):
         observations, actions, rewards, terminals = self.buffer.sample(self.config['batch_size'], self.config['sequence_length'])
         self.key, subkey = jx.random.split(self.key)
-        grads, phis, hs = self.model_grad_and_states(self.model_params(), subkey, observations, actions, rewards, terminals)
-        grads = optimizers.clip_grads(grads, self.config['grad_clip'])
-        self.model_opt_state = self.model_opt_update(self.t, grads, self.model_opt_state)
+        subkeys = jx.random.split(subkey, num=self.config['batch_size'])
+        grads, phis, hs = self.model_grad_and_states(self.model_params(), subkeys, observations, actions, rewards, terminals)
+        self.model_opt_state = self.model_update(self.t, grads, self.model_opt_state)
 
         self.key, subkey = jx.random.split(self.key)
-        grads = self.AC_loss_grad(self.actor_params(), self.critic_params(), self.slow_critic_params, self.model_params(), subkey, phis, hs)
-        grads = optimizers.clip_grads(grads, self.config['grad_clip'])
-        self.actor_opt_state = self.actor_opt_update(self.t, grads[0], self.actor_opt_state)
-        self.critic_opt_state = self.critic_opt_update(self.t, grads[1], self.critic_opt_state)
+        subkeys = jx.random.split(subkey, num=self.config['batch_size']*self.config['sequence_length'])
+        grads = self.AC_loss_grad(self.actor_params(), self.critic_params(), self.slow_critic_params, self.model_params(), subkeys, phis, hs)
+        self.actor_opt_state = self.actor_update(self.t, grads[0],self.actor_opt_state)
+        self.critic_opt_state = self.critic_update(self.t, grads[1], self.critic_opt_state)
 
         self.t += 1
 
     def current_value(self, observation):
         self.key, subkey = jx.random.split(self.key)
-        phi = self._observe(self.model_params()['phi'], jnp.expand_dims(jnp.asarray(observation,dtype=float), axis=0), self.phi, self.h, subkey)
+        phi = self._observe(self.model_params()['phi'], jnp.asarray(observation,dtype=float), self.phi, self.h, subkey)
         return self.critic_apply(self.critic_params(), phi, self.h)
 
     def sync_slow_critic(self):
@@ -760,7 +872,8 @@ class dreamer_agent():
     def eval(self):
         observations, actions, rewards, terminals = self.buffer.sample(self.config['batch_size'], self.config['sequence_length'])
         self.key, subkey = jx.random.split(self.key)
-        return self.model_eval(self.model_params(), subkey, observations, actions, rewards, terminals)
+        subkeys = jx.random.split(subkey, num=self.config['batch_size'])
+        return self.model_eval(self.model_params(), subkeys, observations, actions, rewards, terminals)
 
 if __name__ == "__main__":
     ########################################################################

@@ -25,9 +25,9 @@ One notable difference is the addition of a posterior entropy weight to the loss
 Additionally, for the MinAtar environments, observations are explicitly modelled as arrays of Bernoulli variable, which may improve performance by exploiting the fact that observations in MinAtar are known to be binary, although I have not explicitly tested alternatives.
 
 ## Preliminary Results
-The following plots display running average return as a function of training frame for each MinAtar game. These results present a single random seed with the hyperparameters provided in config.json. As such, they should not be used to draw any strong conclusions but are simply included here for proof of concept.
+The following plots display running average return as a function of training frame for each MinAtar game. The results seem fairly good, with the exception of asterix for which performance seems rather weak, however, they correspond to a single random seed with the hyperparameters provided in config.json. As such, they should not be used to draw any strong conclusions but are included here for proof of concept.
 <img align="center" src="img/learning_curves.png" width=800>
-The raw data used to generate these results can be found in a google drive folder [here](https://drive.google.com/drive/folders/1YAi8dAHx_MKV5c-SxHtS4w19NU2ip4sn?usp=sharing). Data, models and replay buffers are available for each game with the file name corresponding to the associated game.
+The raw data used to generate these results can be found in a google drive folder [here](https://drive.google.com/drive/folders/1fQiWf7JJBdq0PsQc1rMXoGkFlAD-1b2e?usp=sharing). Data, models and replay buffers are available for each game with the file name corresponding to the associated game.
 
 ## Analysis Scripts
 The analysis directory contains some scripts for investigating the data and trained model resulting from a training run (for example the files available at the google drive link provided above). To plot a learning curve from a training run you can use a command like

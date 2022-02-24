@@ -12,7 +12,7 @@ class recurrent_network(hk.Module):
         self.activation_function = activation_dict[config['activation']]
 
     def __call__(self, phi, a, h):
-        x = jnp.concatenate([hk.Flatten()(phi), a], axis=1)
+        x = jnp.concatenate([jnp.ravel(phi), a])
         #GRU returns a 2-tuple but I belive both elements are the same, just return the nsext hidden state
         return hk.GRU(self.num_hidden_units)(x,h)[1]
 
@@ -25,12 +25,12 @@ class reward_network(hk.Module):
         self.learn_reward_variance = config['learn_reward_variance']
 
     def __call__(self, phi, h, key=None):
-        x = jnp.concatenate([hk.Flatten()(phi),h],axis=1)
+        x = jnp.concatenate([jnp.ravel(phi),h])
         for i in range(self.num_hidden_layers):
             x = self.activation_function(hk.Linear(self.num_hidden_units)(x))
-        mu = hk.Linear(1)(x)[:,0]
+        mu = hk.Linear(1)(x)[0]
         if(self.learn_reward_variance):
-            sigma = jx.nn.softplus(hk.Linear(1)(x))[:,0]
+            sigma = jx.nn.softplus(hk.Linear(1)(x))[0]
             sigma = jnp.clip(sigma, min_denom, None)
         else:
             sigma = jnp.ones(mu.shape)
@@ -44,10 +44,10 @@ class termination_network(hk.Module):
         self.activation_function = activation_dict[config['activation']]
 
     def __call__(self, phi, h, key=None):
-        x = jnp.concatenate([hk.Flatten()(phi),h],axis=1)
+        x = jnp.concatenate([jnp.ravel(phi),h])
         for i in range(self.num_hidden_layers):
             x = self.activation_function(hk.Linear(self.num_hidden_units)(x))
-        logit = hk.Linear(1)(x)[:,0]
+        logit = hk.Linear(1)(x)[0]
         return {'logit':logit}
 
 class next_phi_network(hk.Module):
@@ -66,26 +66,26 @@ class next_phi_network(hk.Module):
             x = self.activation_function(hk.Linear(self.num_hidden_units)(x))
 
         if(self.latent_type=='gaussian'):
-            mu = hk.Linear(self.num_features)(hk.Flatten()(x))
-            sigma = jx.nn.softplus(hk.Linear(self.num_features)(hk.Flatten()(x)))
+            mu = hk.Linear(self.num_features)(jnp.ravel(x))
+            sigma = jx.nn.softplus(hk.Linear(self.num_features)(jnp.ravel(x)))
             sigma = jnp.clip(sigma,min_denom, None)
 
             x = mu+sigma*jx.random.normal(key,mu.shape)
             return x, {'mu':mu, 'sigma':sigma}
         elif(self.latent_type=='tanh_gaussian'):
-            mu = hk.Linear(self.num_features)(hk.Flatten()(x))
-            sigma = jx.nn.softplus(hk.Linear(self.num_features)(hk.Flatten()(x)))
+            mu = hk.Linear(self.num_features)(jnp.ravel(x))
+            sigma = jx.nn.softplus(hk.Linear(self.num_features)(jnp.ravel(x)))
             sigma = jnp.clip(sigma,min_denom, None)
 
             x = jx.nn.tanh(mu+sigma*jx.random.normal(key,mu.shape))
             return x, {'mu':mu, 'sigma':sigma}
         elif(self.latent_type=='categorical'):
-            logits = jnp.reshape(hk.Linear(self.num_features*self.feature_width)(hk.Flatten()(x)), [-1, self.num_features,self.feature_width])
+            logits = jnp.reshape(hk.Linear(self.num_features*self.feature_width)(jnp.ravel(x)), [self.num_features,self.feature_width])
 
             probs = jx.nn.softmax(logits)
             log_probs = jx.nn.log_softmax(logits)
 
-            x = jx.nn.one_hot(jx.random.categorical(key, logits),self.feature_width, axis=2)
+            x = jx.nn.one_hot(jx.random.categorical(key, logits),self.feature_width, axis=1)
             x = probs+jx.lax.stop_gradient(x-probs)
             return x, {'probs':probs, 'log_probs':log_probs}
 
@@ -108,33 +108,33 @@ class phi_conv_network(hk.Module):
             x = self.activation_function(hk.Conv2D(self.num_conv_filters*(2**i), 3, padding='VALID')(x))
 
         #combine image and recurrent state
-        x = jnp.concatenate([h,hk.Flatten()(x)],axis=1)
+        x = jnp.concatenate([h,jnp.ravel(x)])
 
         #pass both through a MLP
         for i in range(self.num_hidden_layers):
             x = self.activation_function(hk.Linear(self.num_hidden_units)(x))
 
         if(self.latent_type=='gaussian'):
-            mu = hk.Linear(self.num_features)(hk.Flatten()(x))
-            sigma = jx.nn.softplus(hk.Linear(self.num_features)(hk.Flatten()(x)))
+            mu = hk.Linear(self.num_features)(jnp.ravel(x))
+            sigma = jx.nn.softplus(hk.Linear(self.num_features)(jnp.ravel(x)))
             sigma = jnp.clip(sigma,min_denom, None)
 
             x = mu+sigma*jx.random.normal(key,mu.shape)
             return x, {'mu':mu, 'sigma':sigma}
         elif(self.latent_type=='tanh_gaussian'):
-            mu = hk.Linear(self.num_features)(hk.Flatten()(x))
-            sigma = jx.nn.softplus(hk.Linear(self.num_features)(hk.Flatten()(x)))
+            mu = hk.Linear(self.num_features)(jnp.ravel(x))
+            sigma = jx.nn.softplus(hk.Linear(self.num_features)(jnp.ravel(x)))
             sigma = jnp.clip(sigma,min_denom, None)
 
             x = jx.nn.tanh(mu+sigma*jx.random.normal(key,mu.shape))
             return x, {'mu':mu, 'sigma':sigma}
         elif(self.latent_type=='categorical'):
-            logits = jnp.reshape(hk.Linear(self.num_features*self.feature_width)(hk.Flatten()(x)), [-1, self.num_features,self.feature_width])
+            logits = jnp.reshape(hk.Linear(self.num_features*self.feature_width)(jnp.ravel(x)), [self.num_features,self.feature_width])
 
             probs = jx.nn.softmax(logits)
             log_probs = jx.nn.log_softmax(logits)
 
-            x = jx.nn.one_hot(jx.random.categorical(key, logits),self.feature_width, axis=2)
+            x = jx.nn.one_hot(jx.random.categorical(key, logits),self.feature_width, axis=1)
             x = probs+jx.lax.stop_gradient(x-probs)
             return x, {'probs':probs, 'log_probs':log_probs}
 
@@ -149,31 +149,31 @@ class phi_flat_network(hk.Module):
         self.latent_type = config['latent_type']
 
     def __call__(self, s, h, key):
-        x = jnp.concatenate([h,hk.Flatten()(s)],axis=1)
+        x = jnp.concatenate([h,jnp.ravel(s)])
         for i in range(self.num_hidden_layers):
             x = self.activation_function(hk.Linear(self.num_hidden_units)(x))
 
         if(self.latent_type=='gaussian'):
-            mu = hk.Linear(self.num_features)(hk.Flatten()(x))
-            sigma = jx.nn.softplus(hk.Linear(self.num_features)(hk.Flatten()(x)))
+            mu = hk.Linear(self.num_features)(jnp.ravel(x))
+            sigma = jx.nn.softplus(hk.Linear(self.num_features)(jnp.ravel(x)))
             sigma = jnp.clip(sigma,min_denom, None)
 
             x = mu+sigma*jx.random.normal(key,mu.shape)
             return x, {'mu':mu, 'sigma':sigma}
         elif(self.latent_type=='tanh_gaussian'):
-            mu = hk.Linear(self.num_features)(hk.Flatten()(x))
-            sigma = jx.nn.softplus(hk.Linear(self.num_features)(hk.Flatten()(x)))
+            mu = hk.Linear(self.num_features)(jnp.ravel(x))
+            sigma = jx.nn.softplus(hk.Linear(self.num_features)(jnp.ravel(x)))
             sigma = jnp.clip(sigma,min_denom, None)
 
             x = jx.nn.tanh(mu+sigma*jx.random.normal(key,mu.shape))
             return x, {'mu':mu, 'sigma':sigma}
         elif(self.latent_type=='categorical'):
-            logits = jnp.reshape(hk.Linear(self.num_features*self.feature_width)(hk.Flatten()(x)), [-1, self.num_features,self.feature_width])
+            logits = jnp.reshape(hk.Linear(self.num_features*self.feature_width)(jnp.ravel(x)), [self.num_features,self.feature_width])
 
             probs = jx.nn.softmax(logits)
             log_probs = jx.nn.log_softmax(logits)
 
-            x = jx.nn.one_hot(jx.random.categorical(key, logits),self.feature_width, axis=2)
+            x = jx.nn.one_hot(jx.random.categorical(key, logits),self.feature_width, axis=1)
             x = probs+jx.lax.stop_gradient(x-probs)
             return x, {'probs':probs, 'log_probs':log_probs}
 
@@ -195,10 +195,7 @@ class state_conv_network(hk.Module):
         for j in desired_shape:
             num_units*=j
 
-        x = jnp.concatenate([h,hk.Flatten()(phi)],axis=1)
-        # for i in range(num_hidden_layers-1):
-        #     x = self.activation_function(hk.Linear(self.num_hidden_units)(x))
-        # x = self.activation_function(hk.Linear(self.num_hidden_units)(x))
+        x = jnp.concatenate([h,jnp.ravel(phi)])
         x = self.activation_function(hk.Linear(num_units)(x))
         x = jnp.reshape(x, [-1]+desired_shape)
         for i in range(self.conv_depth-1):
@@ -227,7 +224,7 @@ class state_flat_network(hk.Module):
         self.state_width = state_width
 
     def __call__(self, phi, h):
-        x = jnp.concatenate([h,hk.Flatten()(phi)],axis=1)
+        x = jnp.concatenate([h,jnp.ravel(phi)])
         for i in range(self.num_hidden_layers):
             x = self.activation_function(hk.Linear(self.num_hidden_units)(x))
         if(self.binary):
@@ -247,10 +244,10 @@ class critic_network(hk.Module):
         super().__init__(name=name)
 
     def __call__(self, phi, h):
-        x = jnp.concatenate([hk.Flatten()(phi), h],axis=1)
+        x = jnp.concatenate([jnp.ravel(phi), h])
         for i in range(self.num_hidden_layers):
             x = self.activation_function(hk.Linear(self.num_hidden_units)(x))
-        V = hk.Linear(1)(x)[:,0]
+        V = hk.Linear(1)(x)[0]
         return V
 
 class actor_network(hk.Module):
@@ -262,7 +259,7 @@ class actor_network(hk.Module):
         self.activation_function = activation_dict[config['activation']]
 
     def __call__(self, phi, h):
-        x = jnp.concatenate([h,hk.Flatten()(phi), h],axis=1)
+        x = jnp.concatenate([h,jnp.ravel(phi), h])
         for i in range(self.num_hidden_layers):
             x = self.activation_function(hk.Linear(self.num_hidden_units)(x))
         pi_logit = hk.Linear(self.num_actions)(x)

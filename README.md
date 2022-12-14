@@ -1,5 +1,5 @@
 # DreamerV2 JAX+Haiku
-An implementation of DreamerV2 written in JAX and Haiku. Preliminary experimental result are provided for the MinAtar testbed as a proof of concept.
+An implementation of DreamerV2 written in JAX and Haiku. Preliminary experimental result are provided for the MinAtar testbed as a proof of concept. Please see https://github.com/kenjyoung/dreamerv2_JAX for a newer version with more features.
 
 ## Usage
 Using this repo requires JAX, Haiku, NumPy and OpenAI gym. The included config.json file specifies an experiment in MinAtar which will also require installation of MinAtar. A new training run can be performed with a command like the following:

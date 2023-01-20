@@ -35,6 +35,6 @@
     "no_conv": false,
     "latent_type": "categorical",
     "env": "MinAtar/SpaceInvaders-v1",
-    "cpu_replay": false,
+    "cpu_replay": true,
     "learn_reward_variance": false
 }

@@ -1,10 +1,17 @@
 # Fork of DreamerV2 JAX+Haiku
 
-This work is the same as https://github.com/kenjyoung/dreamerv2 but uses the Optax library for training.
+🚨 This fork makes the agent compatible with Optax for optimizing, as well as a little bit of refactoring. 🚨
 
-Please see the original work for any details.
+Please see the original work https://github.com/kenjyoung/dreamerv2 for any details.
 
-To run :
+## Installation
+Follow [jax installation](https://github.com/google/jax/#installation), then: 
 ```shell
-python3 dreamerv2.py
+pip install -r requirements.txt
+```
+
+## Training
+Run the following command for learning to play on MinAtar:
+```bash
+python dreamerv2.py
 ```

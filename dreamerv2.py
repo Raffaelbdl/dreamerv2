@@ -90,7 +90,13 @@ if __name__ == "__main__":
 
             agent.add_to_replay(state, action, reward, terminal)
 
-            state, reward, terminal, _ = env.step(action)
+            step = env.step(action)
+            if len(step) == 4:
+                state, reward, terminal, _ = step
+            elif len(step) == 5:
+                state, reward, terminal, _, _ = step
+            else:
+                raise ValueError()
 
             curr_return += reward
 

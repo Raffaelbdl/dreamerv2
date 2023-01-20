@@ -178,7 +178,7 @@ class dreamer_agent:
         model_opt_state = optimizer.init(model_params)
 
         self.model_state = {"params": model_params, "opt_state": model_opt_state}
-        self.model_update = jit(lambda p, s, g: apply_updates(optimizer, p, s, g, -1))
+        self.model_update = jit(lambda p, s, g: apply_updates(optimizer, p, s, g))
 
         model_loss_and_states = get_model_loss_and_states_function(
             config,
@@ -252,7 +252,7 @@ class dreamer_agent:
         actor_opt_state = actor_optimizer.init(actor_params)
         self.actor_state = {"params": actor_params, "opt_state": actor_opt_state}
         self.actor_update = jit(
-            lambda p, s, g: apply_updates(actor_optimizer, p, s, g, -1)
+            lambda p, s, g: apply_updates(actor_optimizer, p, s, g)
         )
 
         critic_opt_state = critic_optimizer.init(fast_critic_params)
@@ -261,7 +261,7 @@ class dreamer_agent:
             "opt_state": critic_opt_state,
         }
         self.critic_update = jit(
-            lambda p, s, g: apply_updates(critic_optimizer, p, s, g, -1)
+            lambda p, s, g: apply_updates(critic_optimizer, p, s, g)
         )
 
         self.AC_loss_grad = jit(

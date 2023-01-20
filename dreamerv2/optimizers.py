@@ -7,8 +7,7 @@ def apply_updates(
     params: hk.Params,
     opt_state: optax.OptState,
     grads,
-    k: float,
 ):
     updates, opt_state = optimizer.update(grads, opt_state, params)
-    params = optax.apply_updates(params, updates, k)
+    params = optax.apply_updates(params, updates)
     return params, opt_state

@@ -1,0 +1,4 @@
+dm-haiku
+optax
+gym
+MinAtar
